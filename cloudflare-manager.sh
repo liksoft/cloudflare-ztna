@@ -1359,19 +1359,22 @@ generate_hosts_entries() {
     echo -e "  ${CYAN}Ajouter ces lignes à /etc/hosts des machines internes:${NC}"
     echo ""
     
-    awk '
-    /^  - hostname:/ { hostname=$3 }
-    /^    service:/ { 
-        if (hostname != "" && $2 !~ /http_status/) {
-            # Extraire l'IP du service
-            match($2, /([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/, arr)
-            if (arr[1] != "") {
-                printf "  %s\t%s\n", arr[1], hostname
-            }
-        }
-        hostname=""
-    }
-    ' "$CONFIG_FILE"
+    if [ -f "$CONFIG_FILE" ]; then
+        grep -A1 "hostname:" "$CONFIG_FILE" | while read -r line; do
+            if echo "$line" | grep -q "hostname:"; then
+                hostname=$(echo "$line" | awk '{print $3}')
+            elif echo "$line" | grep -q "service:"; then
+                service=$(echo "$line" | awk '{print $2}')
+                if [[ "$service" != *"http_status"* ]]; then
+                    # Extraire IP (entre :// et :port ou fin)
+                    ip=$(echo "$service" | sed -E 's|.*://([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+).*|\1|')
+                    if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                        printf "  %-15s\t%s\n" "$ip" "$hostname"
+                    fi
+                fi
+            fi
+        done
+    fi
     
     echo ""
     press_enter
@@ -1388,19 +1391,22 @@ generate_dns_zone() {
     echo "  \$TTL 3600"
     echo ""
     
-    awk -v domain="$CF_DOMAIN" '
-    /^  - hostname:/ { hostname=$3 }
-    /^    service:/ { 
-        if (hostname != "" && $2 !~ /http_status/) {
-            match($2, /([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/, arr)
-            if (arr[1] != "") {
-                sub("." domain "$", "", hostname)
-                printf "  %-20s IN A     %s\n", hostname, arr[1]
-            }
-        }
-        hostname=""
-    }
-    ' "$CONFIG_FILE"
+    if [ -f "$CONFIG_FILE" ]; then
+        grep -A1 "hostname:" "$CONFIG_FILE" | while read -r line; do
+            if echo "$line" | grep -q "hostname:"; then
+                hostname=$(echo "$line" | awk '{print $3}')
+            elif echo "$line" | grep -q "service:"; then
+                service=$(echo "$line" | awk '{print $2}')
+                if [[ "$service" != *"http_status"* ]]; then
+                    ip=$(echo "$service" | sed -E 's|.*://([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+).*|\1|')
+                    if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                        short_hostname=$(echo "$hostname" | sed "s/\.${CF_DOMAIN}$//")
+                        printf "  %-20s IN A     %s\n" "$short_hostname" "$ip"
+                    fi
+                fi
+            fi
+        done
+    fi
     
     echo ""
     press_enter
@@ -1414,18 +1420,21 @@ show_dnsmasq_config() {
     echo -e "  ${CYAN}Ajouter à /etc/dnsmasq.conf:${NC}"
     echo ""
     
-    awk -v domain="$CF_DOMAIN" '
-    /^  - hostname:/ { hostname=$3 }
-    /^    service:/ { 
-        if (hostname != "" && $2 !~ /http_status/) {
-            match($2, /([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/, arr)
-            if (arr[1] != "") {
-                printf "  address=/%s/%s\n", hostname, arr[1]
-            }
-        }
-        hostname=""
-    }
-    ' "$CONFIG_FILE"
+    if [ -f "$CONFIG_FILE" ]; then
+        grep -A1 "hostname:" "$CONFIG_FILE" | while read -r line; do
+            if echo "$line" | grep -q "hostname:"; then
+                hostname=$(echo "$line" | awk '{print $3}')
+            elif echo "$line" | grep -q "service:"; then
+                service=$(echo "$line" | awk '{print $2}')
+                if [[ "$service" != *"http_status"* ]]; then
+                    ip=$(echo "$service" | sed -E 's|.*://([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+).*|\1|')
+                    if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                        echo "  address=/${hostname}/${ip}"
+                    fi
+                fi
+            fi
+        done
+    fi
     
     echo ""
     press_enter
