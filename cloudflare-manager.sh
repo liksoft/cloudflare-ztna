@@ -10,7 +10,7 @@
 #   - Configuration SSL Origin pour intranet
 #   - Gestion ZTNA (Zero Trust Network Access)
 #
-#   Auteur: CNSS/HDL - Togo
+#   Auteur: LIKSOFT
 #   Version: 2.0
 #
 #===============================================================================
@@ -55,7 +55,7 @@ print_banner() {
     echo "║     ╚═════╝╚══════╝ ╚═════╝  ╚═════╝ ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═╝    ║"
     echo "║                                                                           ║"
     echo "║                    TUNNEL MANAGER - Version 2.0                           ║"
-    echo "║                         CNSS/HDL - Togo                                   ║"
+    echo "║                            LIKSOFT                                        ║"
     echo "║                                                                           ║"
     echo "╚═══════════════════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"

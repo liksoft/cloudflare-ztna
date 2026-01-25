@@ -1116,5 +1116,5 @@ nslookup app.hdl.tg
 
 ---
 
-**Auteur** : CNSS/HDL - Togo
+**Auteur** : LIKSOFT
 **Licence** : MIT
