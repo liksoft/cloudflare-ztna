@@ -2,6 +2,8 @@
 
 ## Cloudflare ZTNA Manager - Version 2.0
 
+**Repository GitHub** : [https://github.com/liksoft/cloudflare-ztna](https://github.com/liksoft/cloudflare-ztna)
+
 ---
 
 ## Table des matieres
@@ -1096,6 +1098,7 @@ nslookup app.hdl.tg
 
 ### 12.4 Ressources externes
 
+- [Repository du projet](https://github.com/liksoft/cloudflare-ztna)
 - [Documentation Cloudflare Tunnels](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/)
 - [API Reference](https://api.cloudflare.com/)
 - [GitHub cloudflared](https://github.com/cloudflare/cloudflared)

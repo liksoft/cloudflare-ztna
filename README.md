@@ -2,9 +2,10 @@
 
 **Toolkit complet pour la gestion des tunnels Cloudflare et l'implémentation Zero Trust Network Access (ZTNA)**
 
-[![Version](https://img.shields.io/badge/version-2.0-blue.svg)](https://github.com)
+[![Version](https://img.shields.io/badge/version-2.0-blue.svg)](https://github.com/liksoft/cloudflare-ztna)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)](https://github.com)
+[![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)](https://github.com/liksoft/cloudflare-ztna)
+[![GitHub](https://img.shields.io/badge/GitHub-Repository-black.svg)](https://github.com/liksoft/cloudflare-ztna)
 
 ---
 
@@ -112,7 +113,7 @@ Les scripts installent automatiquement les dependances manquantes :
 
 ```bash
 # Cloner le repository
-git clone https://github.com/your-repo/cloudflare-ztna.git
+git clone git@github.com:liksoft/cloudflare-ztna.git
 cd cloudflare-ztna
 
 # Lancer le manager interactif
@@ -652,6 +653,7 @@ Ce projet est sous licence MIT. Voir le fichier [LICENSE](LICENSE) pour plus de 
 
 ## Liens utiles
 
+- [Repository GitHub](https://github.com/liksoft/cloudflare-ztna)
 - [Documentation Cloudflare Tunnels](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/)
 - [Cloudflare Zero Trust](https://developers.cloudflare.com/cloudflare-one/)
 - [API Cloudflare](https://api.cloudflare.com/)
