@@ -585,8 +585,9 @@ menu_applications() {
         echo -e "  ${GREEN}3)${NC} Ajouter un accès SSH"
         echo -e "  ${GREEN}4)${NC} Ajouter un accès RDP"
         echo -e "  ${GREEN}5)${NC} Ajouter un service TCP personnalisé"
-        echo -e "  ${GREEN}6)${NC} Supprimer une application"
-        echo -e "  ${GREEN}7)${NC} Éditer la configuration manuellement"
+        echo -e "  ${GREEN}6)${NC} Modifier une application"
+        echo -e "  ${GREEN}7)${NC} Supprimer une application"
+        echo -e "  ${GREEN}8)${NC} Éditer la configuration manuellement"
         echo ""
         echo -e "  ${RED}0)${NC} Retour"
         echo ""
@@ -598,8 +599,9 @@ menu_applications() {
             3) add_ssh_application ;;
             4) add_rdp_application ;;
             5) add_tcp_application ;;
-            6) remove_application ;;
-            7) edit_config ;;
+            6) modify_application ;;
+            7) remove_application ;;
+            8) edit_config ;;
             0) return ;;
             *) print_error "Choix invalide" ;;
         esac
@@ -992,6 +994,278 @@ configure_dns() {
     fi
 }
 
+modify_application() {
+    print_section "Modifier une application"
+    
+    if [ ! -f "$CONFIG_FILE" ]; then
+        print_error "Aucune configuration trouvée"
+        press_enter
+        return
+    fi
+    
+    # Lister les applications dans un tableau
+    echo -e "  ${CYAN}Applications configurées:${NC}"
+    echo ""
+    
+    local -a apps_array=()
+    local -a services_array=()
+    
+    while IFS= read -r line; do
+        local app=$(echo "$line" | awk '{print $1}')
+        local svc=$(echo "$line" | awk '{print $2}')
+        [ -n "$app" ] && apps_array+=("$app") && services_array+=("$svc")
+    done < <(awk '
+    /^  - hostname:/ { hostname=$3 }
+    /^    service:/ { 
+        if (hostname != "" && $2 !~ /http_status/) {
+            print hostname, $2
+        }
+        hostname=""
+    }
+    ' "$CONFIG_FILE")
+    
+    if [ ${#apps_array[@]} -eq 0 ]; then
+        print_warning "Aucune application configurée"
+        press_enter
+        return
+    fi
+    
+    local i=1
+    for idx in "${!apps_array[@]}"; do
+        echo "    $i) ${apps_array[$idx]} → ${services_array[$idx]}"
+        i=$((i + 1))
+    done
+    
+    echo ""
+    read -p "  Numéro ou domaine à modifier: " input
+    
+    if [ -z "$input" ]; then
+        return
+    fi
+    
+    local domain=""
+    local current_service=""
+    local selected_idx=0
+    
+    # Vérifier si c'est un numéro ou un domaine
+    if [[ "$input" =~ ^[0-9]+$ ]]; then
+        if [ "$input" -ge 1 ] && [ "$input" -le ${#apps_array[@]} ]; then
+            selected_idx=$((input-1))
+            domain="${apps_array[$selected_idx]}"
+            current_service="${services_array[$selected_idx]}"
+        else
+            print_error "Numéro invalide"
+            press_enter
+            return
+        fi
+    else
+        domain="$input"
+        for idx in "${!apps_array[@]}"; do
+            if [ "${apps_array[$idx]}" = "$domain" ]; then
+                selected_idx=$idx
+                current_service="${services_array[$idx]}"
+                break
+            fi
+        done
+    fi
+    
+    if [ -z "$current_service" ]; then
+        print_error "Application non trouvée: ${domain}"
+        press_enter
+        return
+    fi
+    
+    # Extraire les composants du service actuel
+    local current_protocol=$(echo "$current_service" | sed -E 's|^([^:]+)://.*|\1|')
+    local current_ip=$(echo "$current_service" | sed -E 's|^[^:]+://([^:]+):.*|\1|')
+    local current_port=$(echo "$current_service" | sed -E 's|^[^:]+://[^:]+:([0-9]+).*|\1|')
+    
+    echo ""
+    echo -e "  ${CYAN}Configuration actuelle:${NC}"
+    echo "    Domaine:   ${domain}"
+    echo "    Protocole: ${current_protocol}"
+    echo "    IP:        ${current_ip}"
+    echo "    Port:      ${current_port}"
+    echo ""
+    echo -e "  ${CYAN}Nouvelles valeurs (Entrée pour garder l'actuelle):${NC}"
+    echo ""
+    
+    # Nouveau protocole
+    echo "  Protocoles: http, https, ssh, tcp, rdp"
+    read -p "  Protocole [$current_protocol]: " new_protocol
+    new_protocol=${new_protocol:-$current_protocol}
+    
+    # Nouvelle IP
+    read -p "  IP [$current_ip]: " new_ip
+    new_ip=${new_ip:-$current_ip}
+    
+    # Nouveau port
+    read -p "  Port [$current_port]: " new_port
+    new_port=${new_port:-$current_port}
+    
+    local new_service="${new_protocol}://${new_ip}:${new_port}"
+    
+    echo ""
+    echo -e "  ${CYAN}Résumé des modifications:${NC}"
+    echo "    Ancien: ${current_service}"
+    echo "    Nouveau: ${new_service}"
+    echo ""
+    
+    if ! confirm "Appliquer les modifications?"; then
+        return
+    fi
+    
+    # Lire les infos du tunnel
+    local tunnel_id=$(grep "^tunnel:" "$CONFIG_FILE" | awk '{print $2}')
+    local creds_file=$(grep "^credentials-file:" "$CONFIG_FILE" | awk '{print $2}')
+    
+    # Collecter toutes les applications avec modification
+    local apps_data=$(mktemp)
+    awk -v modify_domain="$domain" -v new_service="$new_service" '
+    /^  - hostname:/ { 
+        current_hostname=$3
+        in_app=1
+        if (current_hostname == modify_domain) {
+            current_app="  - hostname: " current_hostname "\n    service: " new_service "\n"
+            modifying=1
+        } else {
+            current_app=$0 "\n"
+            modifying=0
+        }
+        next
+    }
+    /^  - service: http_status:404/ {
+        in_app=0
+        next
+    }
+    in_app && /^    service:/ {
+        if (!modifying) {
+            current_app=current_app $0 "\n"
+        }
+        next
+    }
+    in_app && /^    / {
+        if (!modifying) {
+            current_app=current_app $0 "\n"
+        }
+        next
+    }
+    in_app && (/^  -/ || /^  #/ || /^[^ ]/) {
+        if (current_app != "") {
+            printf "%s", current_app
+        }
+        in_app=0
+        current_app=""
+        if (/^  - hostname:/) {
+            current_hostname=$3
+            in_app=1
+            if (current_hostname == modify_domain) {
+                current_app="  - hostname: " current_hostname "\n    service: " new_service "\n"
+                modifying=1
+            } else {
+                current_app=$0 "\n"
+                modifying=0
+            }
+        }
+    }
+    END {
+        if (in_app && current_app != "") {
+            printf "%s", current_app
+        }
+    }
+    ' "$CONFIG_FILE" > "$apps_data"
+    
+    # Recréer le fichier config proprement
+    cat > "$CONFIG_FILE" << EOF
+#===============================================================================
+# Configuration Cloudflare Tunnel
+# Mis à jour le: $(date)
+#===============================================================================
+
+tunnel: ${tunnel_id}
+credentials-file: ${creds_file}
+
+ingress:
+EOF
+
+    # Ajouter les applications
+    if [ -s "$apps_data" ]; then
+        echo "" >> "$CONFIG_FILE"
+        cat "$apps_data" >> "$CONFIG_FILE"
+    fi
+    
+    # Ajouter originRequest si nécessaire pour l'app modifiée
+    # On va reconstruire proprement
+    local final_config=$(mktemp)
+    cp "$CONFIG_FILE" "$final_config"
+    
+    # Recréer avec originRequest approprié
+    cat > "$CONFIG_FILE" << EOF
+#===============================================================================
+# Configuration Cloudflare Tunnel
+# Mis à jour le: $(date)
+#===============================================================================
+
+tunnel: ${tunnel_id}
+credentials-file: ${creds_file}
+
+ingress:
+EOF
+
+    # Parcourir les apps et ajouter avec bon format
+    while IFS= read -r line; do
+        local app_domain=$(echo "$line" | awk '{print $1}')
+        local app_service=$(echo "$line" | awk '{print $2}')
+        local app_protocol=$(echo "$app_service" | sed -E 's|^([^:]+)://.*|\1|')
+        
+        echo "" >> "$CONFIG_FILE"
+        echo "  #-----------------------------------------------------------------------------" >> "$CONFIG_FILE"
+        echo "  # ${app_domain} → ${app_service}" >> "$CONFIG_FILE"
+        echo "  #-----------------------------------------------------------------------------" >> "$CONFIG_FILE"
+        echo "  - hostname: ${app_domain}" >> "$CONFIG_FILE"
+        echo "    service: ${app_service}" >> "$CONFIG_FILE"
+        
+        case $app_protocol in
+            ssh|rdp|tcp)
+                # Pas d'originRequest
+                ;;
+            https)
+                echo "    originRequest:" >> "$CONFIG_FILE"
+                echo "      connectTimeout: 30s" >> "$CONFIG_FILE"
+                echo "      noTLSVerify: true" >> "$CONFIG_FILE"
+                ;;
+            *)
+                echo "    originRequest:" >> "$CONFIG_FILE"
+                echo "      connectTimeout: 30s" >> "$CONFIG_FILE"
+                ;;
+        esac
+    done < <(awk '
+    /^  - hostname:/ { hostname=$3 }
+    /^    service:/ { 
+        if (hostname != "" && $2 !~ /http_status/) {
+            print hostname, $2
+        }
+        hostname=""
+    }
+    ' "$final_config")
+    
+    # Ajouter le catch-all
+    echo "" >> "$CONFIG_FILE"
+    echo "  #-----------------------------------------------------------------------------" >> "$CONFIG_FILE"
+    echo "  # Catch-all (requis - toujours en dernier)" >> "$CONFIG_FILE"
+    echo "  #-----------------------------------------------------------------------------" >> "$CONFIG_FILE"
+    echo "  - service: http_status:404" >> "$CONFIG_FILE"
+    
+    # Nettoyer
+    rm -f "$apps_data" "$final_config"
+    
+    print_success "Application ${domain} modifiée"
+    
+    restart_tunnel
+    
+    press_enter
+}
+
 remove_application() {
     print_section "Supprimer une application"
     
@@ -1001,30 +1275,59 @@ remove_application() {
         return
     fi
     
-    # Lister les applications
+    # Lister les applications dans un tableau
     echo -e "  ${CYAN}Applications configurées:${NC}"
     echo ""
     
-    local apps=$(awk '/^  - hostname:/ { print $3 }' "$CONFIG_FILE" | grep -v "^$")
-    local i=1
-    
+    local -a apps_array=()
     while IFS= read -r app; do
-        echo "    $i) $app"
-        i=$((i + 1))
-    done <<< "$apps"
+        [ -n "$app" ] && apps_array+=("$app")
+    done < <(awk '/^  - hostname:/ { print $3 }' "$CONFIG_FILE" | grep -v "^$")
     
-    echo ""
-    read -p "  Domaine à supprimer: " domain
-    
-    if [ -z "$domain" ]; then
-        return
-    fi
-    
-    if ! grep -q "hostname: ${domain}$" "$CONFIG_FILE"; then
-        print_error "Application non trouvée"
+    if [ ${#apps_array[@]} -eq 0 ]; then
+        print_warning "Aucune application configurée"
         press_enter
         return
     fi
+    
+    local i=1
+    for app in "${apps_array[@]}"; do
+        echo "    $i) $app"
+        i=$((i + 1))
+    done
+    
+    echo ""
+    read -p "  Numéro ou domaine à supprimer: " input
+    
+    if [ -z "$input" ]; then
+        return
+    fi
+    
+    local domain=""
+    
+    # Vérifier si c'est un numéro ou un domaine
+    if [[ "$input" =~ ^[0-9]+$ ]]; then
+        # C'est un numéro
+        if [ "$input" -ge 1 ] && [ "$input" -le ${#apps_array[@]} ]; then
+            domain="${apps_array[$((input-1))]}"
+        else
+            print_error "Numéro invalide"
+            press_enter
+            return
+        fi
+    else
+        # C'est un domaine
+        domain="$input"
+    fi
+    
+    if ! grep -q "hostname: ${domain}$" "$CONFIG_FILE"; then
+        print_error "Application non trouvée: ${domain}"
+        press_enter
+        return
+    fi
+    
+    echo ""
+    echo -e "  ${YELLOW}Application sélectionnée: ${domain}${NC}"
     
     if ! confirm "Supprimer ${domain}?"; then
         return
@@ -1033,32 +1336,76 @@ remove_application() {
     # Créer une sauvegarde
     cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
     
-    # Supprimer l'entrée (méthode simple)
-    local temp_file=$(mktemp)
-    awk -v domain="$domain" '
-    BEGIN { skip = 0 }
-    /^  #-+$/ { 
-        comment = $0
-        getline nextline
-        if (nextline ~ "# " domain " ") {
-            skip = 1
-            next
-        } else {
-            print comment
-            print nextline
-            next
+    # Lire les infos du tunnel
+    local tunnel_id=$(grep "^tunnel:" "$CONFIG_FILE" | awk '{print $2}')
+    local creds_file=$(grep "^credentials-file:" "$CONFIG_FILE" | awk '{print $2}')
+    
+    # Collecter les applications existantes SAUF celle à supprimer
+    local apps_data=$(mktemp)
+    awk -v exclude="$domain" '
+    /^  - hostname:/ { 
+        current_hostname=$3
+        in_app=1
+        current_app=$0 "\n"
+        next
+    }
+    /^  - service: http_status:404/ {
+        in_app=0
+        next
+    }
+    in_app && /^    / {
+        current_app=current_app $0 "\n"
+        next
+    }
+    in_app && (/^  -/ || /^  #/ || /^[^ ]/) {
+        if (current_app != "" && current_hostname != exclude) {
+            printf "%s", current_app
+        }
+        in_app=0
+        current_app=""
+        if (/^  - hostname:/) {
+            current_hostname=$3
+            in_app=1
+            current_app=$0 "\n"
         }
     }
-    /^  - hostname:/ && $3 == domain { skip = 1; next }
-    skip && /^    / { next }
-    skip && /^  - hostname:/ { skip = 0 }
-    skip && /^  #/ { skip = 0 }
-    !skip { print }
-    ' "$CONFIG_FILE" > "$temp_file"
+    END {
+        if (in_app && current_app != "" && current_hostname != exclude) {
+            printf "%s", current_app
+        }
+    }
+    ' "$CONFIG_FILE" > "$apps_data"
     
-    mv "$temp_file" "$CONFIG_FILE"
+    # Recréer le fichier config proprement
+    cat > "$CONFIG_FILE" << EOF
+#===============================================================================
+# Configuration Cloudflare Tunnel
+# Mis à jour le: $(date)
+#===============================================================================
+
+tunnel: ${tunnel_id}
+credentials-file: ${creds_file}
+
+ingress:
+EOF
+
+    # Ajouter les applications restantes
+    if [ -s "$apps_data" ]; then
+        echo "" >> "$CONFIG_FILE"
+        cat "$apps_data" >> "$CONFIG_FILE"
+    fi
     
-    print_success "Application supprimée"
+    # Ajouter le catch-all à la fin
+    echo "" >> "$CONFIG_FILE"
+    echo "  #-----------------------------------------------------------------------------" >> "$CONFIG_FILE"
+    echo "  # Catch-all (requis - toujours en dernier)" >> "$CONFIG_FILE"
+    echo "  #-----------------------------------------------------------------------------" >> "$CONFIG_FILE"
+    echo "  - service: http_status:404" >> "$CONFIG_FILE"
+    
+    # Nettoyer
+    rm -f "$apps_data"
+    
+    print_success "Application ${domain} supprimée"
     print_warning "L'enregistrement DNS n'est pas supprimé automatiquement"
     
     restart_tunnel
