@@ -10,7 +10,7 @@
 #   - Configuration SSL Origin pour intranet
 #   - Gestion ZTNA (Zero Trust Network Access)
 #
-#   Auteur: LIKSOFT
+#   Auteur: CNSS/HDL - Togo
 #   Version: 2.0
 #
 #===============================================================================
@@ -55,7 +55,7 @@ print_banner() {
     echo "║     ╚═════╝╚══════╝ ╚═════╝  ╚═════╝ ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═╝    ║"
     echo "║                                                                           ║"
     echo "║                    TUNNEL MANAGER - Version 2.0                           ║"
-    echo "║                            LIKSOFT                                        ║"
+    echo "║                         CNSS/HDL - Togo                                   ║"
     echo "║                                                                           ║"
     echo "╚═══════════════════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
@@ -885,41 +885,97 @@ add_ingress_entry() {
     local no_tls=${3:-false}
     local type=${4:-web}
     
-    # Créer le bloc à insérer
-    local entry=""
+    # Lire les infos du tunnel
+    local tunnel_id=$(grep "^tunnel:" "$CONFIG_FILE" | awk '{print $2}')
+    local creds_file=$(grep "^credentials-file:" "$CONFIG_FILE" | awk '{print $2}')
+    
+    # Collecter les applications existantes (sauf catch-all)
+    local apps_data=$(mktemp)
+    
+    awk '
+    /^  - hostname:/ { 
+        in_app=1
+        current_app=$0 "\n"
+        next
+    }
+    /^  - service: http_status:404/ {
+        in_app=0
+        next
+    }
+    in_app && /^    / {
+        current_app=current_app $0 "\n"
+        next
+    }
+    in_app && /^  [^-]/ {
+        current_app=current_app $0 "\n"
+        next
+    }
+    in_app && (/^  -/ || /^  #/ || /^[^ ]/) {
+        if (current_app != "") {
+            printf "%s", current_app
+        }
+        in_app=0
+        if (/^  - hostname:/) {
+            in_app=1
+            current_app=$0 "\n"
+        }
+    }
+    END {
+        if (in_app && current_app != "") {
+            printf "%s", current_app
+        }
+    }
+    ' "$CONFIG_FILE" > "$apps_data"
+    
+    # Créer le nouveau fichier config
+    cat > "$CONFIG_FILE" << EOF
+#===============================================================================
+# Configuration Cloudflare Tunnel
+# Mis à jour le: $(date)
+#===============================================================================
+
+tunnel: ${tunnel_id}
+credentials-file: ${creds_file}
+
+ingress:
+EOF
+
+    # Ajouter les applications existantes
+    if [ -s "$apps_data" ]; then
+        echo "" >> "$CONFIG_FILE"
+        cat "$apps_data" >> "$CONFIG_FILE"
+    fi
+    
+    # Ajouter la nouvelle application
+    echo "" >> "$CONFIG_FILE"
+    echo "  #-----------------------------------------------------------------------------" >> "$CONFIG_FILE"
+    echo "  # ${hostname} → ${service}" >> "$CONFIG_FILE"
+    echo "  #-----------------------------------------------------------------------------" >> "$CONFIG_FILE"
+    echo "  - hostname: ${hostname}" >> "$CONFIG_FILE"
+    echo "    service: ${service}" >> "$CONFIG_FILE"
     
     case $type in
         ssh|rdp|tcp)
-            entry="  #-----------------------------------------------------------------------------\n"
-            entry+="  # ${hostname} → ${service}\n"
-            entry+="  #-----------------------------------------------------------------------------\n"
-            entry+="  - hostname: ${hostname}\n"
-            entry+="    service: ${service}\n"
+            # Pas d'originRequest pour ces types
             ;;
         *)
-            entry="  #-----------------------------------------------------------------------------\n"
-            entry+="  # ${hostname} → ${service}\n"
-            entry+="  #-----------------------------------------------------------------------------\n"
-            entry+="  - hostname: ${hostname}\n"
-            entry+="    service: ${service}\n"
-            entry+="    originRequest:\n"
-            entry+="      connectTimeout: 30s\n"
+            echo "    originRequest:" >> "$CONFIG_FILE"
+            echo "      connectTimeout: 30s" >> "$CONFIG_FILE"
             if [ "$no_tls" = "true" ]; then
-                entry+="      noTLSVerify: true\n"
+                echo "      noTLSVerify: true" >> "$CONFIG_FILE"
             fi
             ;;
     esac
     
-    # Insérer avant le catch-all
-    local temp_file=$(mktemp)
-    awk -v entry="$entry" '
-    /^  - service: http_status:404/ {
-        printf "%s\n", entry
-    }
-    { print }
-    ' "$CONFIG_FILE" > "$temp_file"
+    # Ajouter le catch-all à la fin
+    echo "" >> "$CONFIG_FILE"
+    echo "  #-----------------------------------------------------------------------------" >> "$CONFIG_FILE"
+    echo "  # Catch-all (requis - toujours en dernier)" >> "$CONFIG_FILE"
+    echo "  #-----------------------------------------------------------------------------" >> "$CONFIG_FILE"
+    echo "  - service: http_status:404" >> "$CONFIG_FILE"
     
-    mv "$temp_file" "$CONFIG_FILE"
+    # Nettoyer
+    rm -f "$apps_data"
 }
 
 configure_dns() {
