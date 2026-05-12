@@ -39,6 +39,94 @@ get_service_name() {
 
 SERVICE_NAME=$(get_service_name)
 
+get_tunnel_name_from_config() {
+    if [ ! -f "$CONFIG_FILE" ]; then
+        return 1
+    fi
+
+    local tunnel_id
+    tunnel_id=$(awk '/^tunnel:/ {print $2; exit}' "$CONFIG_FILE")
+
+    if [ -z "$tunnel_id" ]; then
+        return 1
+    fi
+
+    cloudflared tunnel list 2>/dev/null | awk -v id="$tunnel_id" '$1 == id {print $2; exit}'
+}
+
+backup_config() {
+    if [ -f "$CONFIG_FILE" ]; then
+        cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
+    fi
+}
+
+extract_ingress_apps() {
+    local source_file=$1
+
+    awk '
+    function flush_app() {
+        if (in_app && current_app != "") {
+            printf "%s", current_app
+        }
+        in_app = 0
+        current_app = ""
+    }
+
+    /^  - hostname:/ {
+        flush_app()
+        in_app = 1
+        current_app = $0 "\n"
+        next
+    }
+
+    /^  - service: http_status:404/ {
+        flush_app()
+        next
+    }
+
+    /^  - / {
+        flush_app()
+        next
+    }
+
+    in_app && /^    / {
+        current_app = current_app $0 "\n"
+        next
+    }
+
+    END {
+        flush_app()
+    }
+    ' "$source_file"
+}
+
+write_config_header() {
+    local tunnel_id=$1
+    local creds_file=$2
+
+    cat > "$CONFIG_FILE" << EOF
+#===============================================================================
+# Configuration Cloudflare Tunnel
+# Mis à jour le: $(date)
+#===============================================================================
+
+tunnel: ${tunnel_id}
+credentials-file: ${creds_file}
+
+ingress:
+EOF
+}
+
+write_ingress_catch_all() {
+    cat >> "$CONFIG_FILE" << EOF
+
+  #-----------------------------------------------------------------------------
+  # Catch-all (requis - toujours en dernier)
+  #-----------------------------------------------------------------------------
+  - service: http_status:404
+EOF
+}
+
 #-------------------------------------------------------------------------------
 # Afficher l'aide
 #-------------------------------------------------------------------------------
@@ -356,7 +444,7 @@ cmd_add_app() {
     fi
     
     # Vérifier si existe déjà
-    if grep -q "hostname: ${domain}$" "$CONFIG_FILE"; then
+    if awk -v host="$domain" '/^  - hostname:/ && $3 == host { found = 1 } END { exit !found }' "$CONFIG_FILE"; then
         echo -e "${RED}L'application ${domain} existe déjà${NC}"
         exit 1
     fi
@@ -389,57 +477,20 @@ cmd_add_app() {
     echo -e "${YELLOW}Ajout: ${domain} → ${service}${NC}"
     
     # Récupérer le nom du tunnel
-    TUNNEL_NAME=$(cloudflared tunnel list 2>/dev/null | grep -v "ID" | head -1 | awk '{print $2}')
+    TUNNEL_NAME=$(get_tunnel_name_from_config)
     
     # Lire les infos du tunnel
     local tunnel_id=$(grep "^tunnel:" "$CONFIG_FILE" | awk '{print $2}')
     local creds_file=$(grep "^credentials-file:" "$CONFIG_FILE" | awk '{print $2}')
+
+    backup_config
     
     # Collecter les applications existantes
     local apps_data=$(mktemp)
-    awk '
-    /^  - hostname:/ { 
-        in_app=1
-        current_app=$0 "\n"
-        next
-    }
-    /^  - service: http_status:404/ {
-        in_app=0
-        next
-    }
-    in_app && /^    / {
-        current_app=current_app $0 "\n"
-        next
-    }
-    in_app && (/^  -/ || /^  #/ || /^[^ ]/) {
-        if (current_app != "") {
-            printf "%s", current_app
-        }
-        in_app=0
-        if (/^  - hostname:/) {
-            in_app=1
-            current_app=$0 "\n"
-        }
-    }
-    END {
-        if (in_app && current_app != "") {
-            printf "%s", current_app
-        }
-    }
-    ' "$CONFIG_FILE" > "$apps_data"
+    extract_ingress_apps "$CONFIG_FILE" > "$apps_data"
     
     # Recréer le fichier config proprement
-    cat > "$CONFIG_FILE" << EOF
-#===============================================================================
-# Configuration Cloudflare Tunnel
-# Mis à jour le: $(date)
-#===============================================================================
-
-tunnel: ${tunnel_id}
-credentials-file: ${creds_file}
-
-ingress:
-EOF
+    write_config_header "$tunnel_id" "$creds_file"
 
     # Ajouter les applications existantes
     if [ -s "$apps_data" ]; then
@@ -471,11 +522,7 @@ EOF
     esac
     
     # Ajouter le catch-all à la fin
-    echo "" >> "$CONFIG_FILE"
-    echo "  #-----------------------------------------------------------------------------" >> "$CONFIG_FILE"
-    echo "  # Catch-all (requis - toujours en dernier)" >> "$CONFIG_FILE"
-    echo "  #-----------------------------------------------------------------------------" >> "$CONFIG_FILE"
-    echo "  - service: http_status:404" >> "$CONFIG_FILE"
+    write_ingress_catch_all
     
     # Nettoyer
     rm -f "$apps_data"
@@ -489,6 +536,8 @@ EOF
             echo -e "${YELLOW}⚠ DNS existe peut-être déjà${NC}"
         }
         echo -e "${GREEN}✓ DNS configuré${NC}"
+    else
+        echo -e "${YELLOW}⚠ Nom du tunnel introuvable, DNS non configuré automatiquement${NC}"
     fi
     
     echo ""
@@ -513,6 +562,9 @@ EOF
         echo -e "  ${YELLOW}3. Se connecter:${NC}"
         echo "     ssh ${domain}"
         echo ""
+    elif [ "$protocol" = "rdp" ] || [ "$protocol" = "tcp" ]; then
+        echo -e "${YELLOW}Note: ${protocol} nécessite un client Cloudflare Access côté utilisateur; ce n'est pas une URL web classique.${NC}"
+        echo ""
     fi
     
     echo -e "${CYAN}Redémarre le service pour appliquer:${NC}"
@@ -535,7 +587,7 @@ cmd_remove_app() {
         exit 1
     fi
     
-    if ! grep -q "hostname: ${domain}$" "$CONFIG_FILE"; then
+    if ! awk -v host="$domain" '/^  - hostname:/ && $3 == host { found = 1 } END { exit !found }' "$CONFIG_FILE"; then
         echo -e "${RED}Application ${domain} non trouvée${NC}"
         exit 1
     fi
@@ -543,37 +595,59 @@ cmd_remove_app() {
     echo -e "${YELLOW}Suppression de ${domain}...${NC}"
     
     # Créer une sauvegarde
-    cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
-    
-    # Supprimer le bloc complet (commentaire + hostname + service + originRequest)
-    # C'est un peu délicat avec sed, utilisons awk
-    awk -v domain="$domain" '
-    BEGIN { skip = 0; skip_count = 0 }
-    /^  #-+$/ && !skip { 
-        # Stocker la ligne de commentaire
-        comment_line = $0
-        getline
-        if ($0 ~ "# " domain " ") {
-            skip = 1
-            skip_count = 0
-            next
-        } else {
-            print comment_line
+    backup_config
+
+    local tunnel_id=$(grep "^tunnel:" "$CONFIG_FILE" | awk '{print $2}')
+    local creds_file=$(grep "^credentials-file:" "$CONFIG_FILE" | awk '{print $2}')
+    local apps_data=$(mktemp)
+
+    awk -v exclude="$domain" '
+    function flush_app() {
+        if (current_app != "" && current_hostname != exclude) {
+            printf "%s", current_app
         }
+        in_app = 0
+        current_app = ""
+        current_hostname = ""
     }
-    skip && /^  #-+$/ { skip_count++ }
-    skip && skip_count >= 1 && /^  - hostname:/ { skip = 0 }
-    skip && /^  - hostname:/ && $0 ~ domain { skip = 1; next }
-    skip && /^    service:/ { next }
-    skip && /^    originRequest:/ { next }
-    skip && /^      / { next }
-    skip && /^  - hostname:/ { skip = 0 }
-    !skip { print }
-    ' "${CONFIG_FILE}.bak" > "$CONFIG_FILE"
-    
-    # Méthode alternative plus simple: supprimer les lignes contenant le domain
-    # et les lignes service/originRequest qui suivent
-    sed -i "/${domain}/,/^  - hostname:\|^  - service: http_status/{ /${domain}/d; /service:/d; /originRequest:/d; /connectTimeout:/d; /noTLSVerify:/d; }" "$CONFIG_FILE"
+
+    /^  - hostname:/ {
+        flush_app()
+        current_hostname = $3
+        in_app = 1
+        current_app = $0 "\n"
+        next
+    }
+
+    /^  - service: http_status:404/ {
+        flush_app()
+        next
+    }
+
+    /^  - / {
+        flush_app()
+        next
+    }
+
+    in_app && /^    / {
+        current_app = current_app $0 "\n"
+        next
+    }
+
+    END {
+        flush_app()
+    }
+    ' "$CONFIG_FILE" > "$apps_data"
+
+    write_config_header "$tunnel_id" "$creds_file"
+
+    if [ -s "$apps_data" ]; then
+        echo "" >> "$CONFIG_FILE"
+        cat "$apps_data" >> "$CONFIG_FILE"
+    fi
+
+    write_ingress_catch_all
+    rm -f "$apps_data"
     
     echo -e "${GREEN}✓ Application supprimée${NC}"
     echo ""
