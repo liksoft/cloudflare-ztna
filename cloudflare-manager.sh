@@ -2327,7 +2327,9 @@ menu_diagnostics() {
         echo -e "  ${GREEN}3)${NC} Afficher la configuration"
         echo -e "  ${GREEN}4)${NC} Valider la configuration"
         echo -e "  ${GREEN}5)${NC} Tester la connectivité"
-        echo -e "  ${GREEN}6)${NC} Informations système"
+        echo -e "  ${GREEN}6)${NC} Diagnostiquer une application"
+        echo -e "  ${GREEN}7)${NC} Vérifier Cloudflare DNS"
+        echo -e "  ${GREEN}8)${NC} Informations système"
         echo ""
         echo -e "  ${RED}0)${NC} Retour"
         echo ""
@@ -2339,7 +2341,9 @@ menu_diagnostics() {
             3) cat "$CONFIG_FILE" 2>/dev/null || print_error "Pas de configuration"; press_enter ;;
             4) cloudflared tunnel --config "$CONFIG_FILE" ingress validate 2>&1; press_enter ;;
             5) test_connectivity ;;
-            6) show_system_info ;;
+            6) diagnose_application ;;
+            7) verify_cloudflare_dns ;;
+            8) show_system_info ;;
             0) return ;;
             *) print_error "Choix invalide" ;;
         esac
@@ -2418,6 +2422,327 @@ test_connectivity() {
         fi
     done
     
+    press_enter
+}
+
+diagnose_application() {
+    print_section "Diagnostic d'une application"
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        print_error "Aucune configuration"
+        press_enter
+        return
+    fi
+
+    echo -e "  ${CYAN}Applications configurées:${NC}"
+    echo ""
+
+    local -a apps_array=()
+    local -a services_array=()
+
+    while IFS= read -r line; do
+        local app=$(echo "$line" | awk '{print $1}')
+        local svc=$(echo "$line" | awk '{print $2}')
+        [ -n "$app" ] && apps_array+=("$app") && services_array+=("$svc")
+    done < <(awk '
+    /^  - hostname:/ { hostname=$3 }
+    /^    service:/ {
+        if (hostname != "" && $2 !~ /http_status/) {
+            print hostname, $2
+        }
+        hostname=""
+    }
+    ' "$CONFIG_FILE")
+
+    if [ ${#apps_array[@]} -eq 0 ]; then
+        print_warning "Aucune application configurée"
+        press_enter
+        return
+    fi
+
+    local i=1
+    for idx in "${!apps_array[@]}"; do
+        echo "    $i) ${apps_array[$idx]} → ${services_array[$idx]}"
+        i=$((i + 1))
+    done
+
+    echo ""
+    read -p "  Numéro ou domaine à diagnostiquer: " input
+
+    if [ -z "$input" ]; then
+        return
+    fi
+
+    local domain=""
+    local service=""
+
+    if [[ "$input" =~ ^[0-9]+$ ]]; then
+        if [ "$input" -ge 1 ] && [ "$input" -le ${#apps_array[@]} ]; then
+            domain="${apps_array[$((input-1))]}"
+            service="${services_array[$((input-1))]}"
+        else
+            print_error "Numéro invalide"
+            press_enter
+            return
+        fi
+    else
+        domain="$input"
+        for idx in "${!apps_array[@]}"; do
+            if [ "${apps_array[$idx]}" = "$domain" ]; then
+                service="${services_array[$idx]}"
+                break
+            fi
+        done
+    fi
+
+    if [ -z "$service" ]; then
+        print_error "Application non trouvée: ${domain}"
+        press_enter
+        return
+    fi
+
+    local protocol=$(echo "$service" | sed -E 's|^([^:]+)://.*|\1|')
+    local target=$(echo "$service" | sed 's|.*://||' | sed 's|/.*||')
+    local ip=$(echo "$target" | cut -d: -f1)
+    local port=$(echo "$target" | cut -d: -f2)
+    local svc=$(get_service_name)
+
+    echo ""
+    echo -e "  ${CYAN}Règle tunnel:${NC}"
+    echo "    Domaine:  ${domain}"
+    echo "    Service:  ${service}"
+    echo "    Systemd:  ${svc}"
+    echo ""
+
+    printf "  %-28s " "Port ${ip}:${port}"
+    if timeout 3 bash -c "echo >/dev/tcp/$ip/$port" 2>/dev/null; then
+        echo -e "${GREEN}✓ ouvert${NC}"
+    else
+        echo -e "${RED}✗ fermé/injoignable${NC}"
+        print_warning "Le tunnel ne pourra pas joindre cette application depuis ce serveur."
+        press_enter
+        return
+    fi
+
+    case "$protocol" in
+        http|https)
+            local curl_opts=(-sS -k -o /dev/null -w "%{http_code} %{redirect_url}" --connect-timeout 5 -H "Host: ${domain}")
+            local origin_url="${protocol}://${ip}:${port}/"
+            local curl_result
+
+            curl_result=$(curl "${curl_opts[@]}" "$origin_url" 2>/dev/null || true)
+            local http_code=$(echo "$curl_result" | awk '{print $1}')
+            local redirect_url=$(echo "$curl_result" | cut -d' ' -f2-)
+
+            echo -e "  ${CYAN}Réponse origine:${NC} ${origin_url}"
+            echo "    HTTP: ${http_code:-erreur}"
+            if [ -n "$redirect_url" ]; then
+                echo "    Redirect: ${redirect_url}"
+            fi
+
+            if [ "$http_code" = "404" ]; then
+                print_warning "L'origine répond 404. Le problème est probablement dans l'application ou son vhost, pas dans Cloudflare."
+            elif [[ "$http_code" =~ ^2|^3 ]]; then
+                print_success "L'origine répond correctement. Si l'URL publique fait 404, vérifie DNS, service redémarré et règle tunnel appliquée."
+            else
+                print_warning "Réponse origine inhabituelle. Vérifie les logs de l'application."
+            fi
+            ;;
+        *)
+            print_info "${protocol} n'est pas testable comme une page web. Utilise un client Cloudflare Access adapté."
+            ;;
+    esac
+
+    echo ""
+    echo -e "  ${CYAN}Commandes utiles:${NC}"
+    echo "    sudo cloudflared tunnel --config $CONFIG_FILE ingress validate"
+    echo "    sudo systemctl restart $svc"
+    echo "    sudo journalctl -u $svc -n 50 --no-pager"
+
+    press_enter
+}
+
+verify_cloudflare_dns() {
+    print_section "Vérification Cloudflare DNS"
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        print_error "Aucune configuration tunnel"
+        press_enter
+        return
+    fi
+
+    load_cf_config
+
+    if [ -z "$CF_API_TOKEN" ] || [ -z "$CF_ZONE_ID" ]; then
+        print_error "Credentials API Cloudflare non configurés"
+        echo "  Va dans: Installation & Configuration Initiale → Configurer les credentials Cloudflare"
+        press_enter
+        return
+    fi
+
+    echo -e "  ${CYAN}Applications configurées:${NC}"
+    echo ""
+
+    local -a apps_array=()
+    local -a services_array=()
+
+    while IFS= read -r line; do
+        local app=$(echo "$line" | awk '{print $1}')
+        local svc=$(echo "$line" | awk '{print $2}')
+        [ -n "$app" ] && apps_array+=("$app") && services_array+=("$svc")
+    done < <(awk '
+    /^  - hostname:/ { hostname=$3 }
+    /^    service:/ {
+        if (hostname != "" && $2 !~ /http_status/) {
+            print hostname, $2
+        }
+        hostname=""
+    }
+    ' "$CONFIG_FILE")
+
+    if [ ${#apps_array[@]} -eq 0 ]; then
+        print_warning "Aucune application configurée"
+        press_enter
+        return
+    fi
+
+    local i=1
+    for idx in "${!apps_array[@]}"; do
+        echo "    $i) ${apps_array[$idx]} → ${services_array[$idx]}"
+        i=$((i + 1))
+    done
+
+    echo ""
+    read -p "  Numéro ou domaine à vérifier: " input
+
+    if [ -z "$input" ]; then
+        return
+    fi
+
+    local domain=""
+    local service=""
+
+    if [[ "$input" =~ ^[0-9]+$ ]]; then
+        if [ "$input" -ge 1 ] && [ "$input" -le ${#apps_array[@]} ]; then
+            domain="${apps_array[$((input-1))]}"
+            service="${services_array[$((input-1))]}"
+        else
+            print_error "Numéro invalide"
+            press_enter
+            return
+        fi
+    else
+        domain="$input"
+        for idx in "${!apps_array[@]}"; do
+            if [ "${apps_array[$idx]}" = "$domain" ]; then
+                service="${services_array[$idx]}"
+                break
+            fi
+        done
+    fi
+
+    if [ -z "$service" ]; then
+        print_warning "Ce domaine n'est pas dans config.yml: ${domain}"
+    fi
+
+    local tunnel_id
+    tunnel_id=$(awk '/^tunnel:/ {print $2; exit}' "$CONFIG_FILE")
+    local expected_cname="${tunnel_id}.cfargotunnel.com"
+
+    echo ""
+    echo -e "  ${CYAN}Configuration locale attendue:${NC}"
+    echo "    Domaine:       ${domain}"
+    echo "    Service local: ${service:-non trouvé dans config.yml}"
+    echo "    Tunnel ID:     ${tunnel_id}"
+    echo "    CNAME attendu: ${expected_cname}"
+    echo ""
+
+    print_info "Test de la zone Cloudflare..."
+    local zone_response
+    zone_response=$(curl -s -X GET "$CF_API_BASE/zones/$CF_ZONE_ID" \
+        -H "Authorization: Bearer $CF_API_TOKEN" \
+        -H "Content-Type: application/json" || true)
+
+    if [ "$(echo "$zone_response" | jq -r '.success // false')" != "true" ]; then
+        print_error "Impossible d'accéder à la zone Cloudflare"
+        echo "$zone_response" | jq -r '.errors[]?.message' 2>/dev/null
+        press_enter
+        return
+    fi
+
+    local zone_name
+    zone_name=$(echo "$zone_response" | jq -r '.result.name')
+    print_success "Zone OK: ${zone_name}"
+
+    print_info "Recherche DNS dans Cloudflare..."
+    local dns_response
+    dns_response=$(curl -s -G "$CF_API_BASE/zones/$CF_ZONE_ID/dns_records" \
+        -H "Authorization: Bearer $CF_API_TOKEN" \
+        -H "Content-Type: application/json" \
+        --data-urlencode "name=${domain}" || true)
+
+    if [ "$(echo "$dns_response" | jq -r '.success // false')" != "true" ]; then
+        print_error "Impossible de lire les DNS Cloudflare"
+        echo "$dns_response" | jq -r '.errors[]?.message' 2>/dev/null
+        press_enter
+        return
+    fi
+
+    local record_count
+    record_count=$(echo "$dns_response" | jq -r '.result | length')
+
+    if [ "$record_count" = "0" ]; then
+        print_error "Aucun enregistrement DNS trouvé pour ${domain}"
+        echo ""
+        echo -e "  ${CYAN}Correction proposée:${NC}"
+        echo "    sudo cloudflared tunnel route dns $(get_tunnel_name_from_config) ${domain}"
+        press_enter
+        return
+    fi
+
+    echo ""
+    echo -e "  ${CYAN}Enregistrements DNS trouvés:${NC}"
+    echo "$dns_response" | jq -r '.result[] | "    Type: \(.type) | Nom: \(.name) | Contenu: \(.content) | Proxied: \(.proxied)"'
+
+    local cname_content
+    cname_content=$(echo "$dns_response" | jq -r '.result[] | select(.type == "CNAME") | .content' | head -1)
+
+    if [ -z "$cname_content" ]; then
+        print_error "Aucun CNAME trouvé. Pour un tunnel, Cloudflare doit avoir un CNAME vers ${expected_cname}"
+    elif [ "$cname_content" = "$expected_cname" ]; then
+        print_success "DNS Cloudflare pointe vers le bon tunnel"
+    else
+        print_error "Le CNAME ne pointe pas vers le tunnel configuré"
+        echo "    Actuel:  ${cname_content}"
+        echo "    Attendu: ${expected_cname}"
+    fi
+
+    if [ -n "$CF_ACCOUNT_ID" ]; then
+        print_info "Vérification du tunnel côté Cloudflare..."
+        local tunnel_response
+        tunnel_response=$(curl -s -X GET "$CF_API_BASE/accounts/$CF_ACCOUNT_ID/cfd_tunnel/$tunnel_id" \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
+            -H "Content-Type: application/json" || true)
+
+        if [ "$(echo "$tunnel_response" | jq -r '.success // false')" = "true" ]; then
+            local tunnel_name tunnel_status
+            tunnel_name=$(echo "$tunnel_response" | jq -r '.result.name // "inconnu"')
+            tunnel_status=$(echo "$tunnel_response" | jq -r '.result.status // "inconnu"')
+            print_success "Tunnel Cloudflare OK: ${tunnel_name} (${tunnel_status})"
+        else
+            print_warning "Impossible de vérifier le tunnel via l'API Account"
+            echo "$tunnel_response" | jq -r '.errors[]?.message' 2>/dev/null
+        fi
+    else
+        print_warning "Account ID non configuré, vérification du tunnel ignorée"
+    fi
+
+    echo ""
+    echo -e "  ${CYAN}Conseils:${NC}"
+    echo "    - Si DNS est OK mais tu as 404, utilise aussi: Diagnostiquer une application"
+    echo "    - Si le CNAME est mauvais, relance: cloudflared tunnel route dns <tunnel> ${domain}"
+    echo "    - Après correction, redémarre: sudo systemctl restart $(get_service_name)"
+
     press_enter
 }
 
